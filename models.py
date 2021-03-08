@@ -396,7 +396,6 @@ class Decoder(nn.Module):
 
                 if return_attention_masks:
                     att_masks.append(attention_mask.unsqueeze(1))
-
                 prediction = self.character_prob(torch.cat([output, context],
                                                            dim=1))  # [B, hidden] concat with [B, key_hidden] ---> linear layer -->  B, Vocab
                 # print("prediction is on GPU?", prediction.device.index)

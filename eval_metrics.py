@@ -135,6 +135,8 @@ def evaluate_metrics_from_lists(predictions: List[str],
              metrics
     :rtype: tuple[dict[str, float], dict[int, dict[str, float]]]
     """
+    print(len(predictions))
+    print(len(ground_truths))
     assert(len(predictions) == len(ground_truths))
     assert(all([len(i) == 5 for i in ground_truths]))
 

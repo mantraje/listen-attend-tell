@@ -174,12 +174,12 @@ def main():
 
     # criterion = nn.CrossEntropyLoss(reduction=None)
     criterion = masked_ce_loss
-    # nepochs = 25
-    nepochs = start_train_epoch + 60
-    save_every = 5
+    nepochs = 2
+    # nepochs = start_train_epoch + 60
+    save_every = 1
 
-    batch_size = 64
-    val_batch_size = 100
+    batch_size = 2
+    val_batch_size = 2
 
     print("nepochs", nepochs)
     print("batch_size", batch_size)
@@ -267,6 +267,7 @@ def main():
 
         print("epoch:", epoch)
         print("train subset...")
+        print(train_loader)
         train_loss = train(model,
                            train_loader,
                            criterion,

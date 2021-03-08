@@ -86,7 +86,7 @@ def val(model, val_loader, criterion, epoch, pretrain_decoder=False, use_gumbel_
 
                 preds_words = greedy_captioning(probs, index2word)
                 print(" len(predictions)", len(preds_words))
-                for i in range(20):
+                for i in range(len(preds_words)):
                     print_predicted_and_gt_utterance(preds_words, first_batch_text, i, index2word)
                 print_captions=False
 

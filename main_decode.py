@@ -99,8 +99,8 @@ def main():
             print("beam_size:", beam_size, "no LM")
 
 
-    model_dir = "checkpoints/4367_red_2_2__128_64_0.98_False_False_0.0005_1e-06/"
-    checkpoint_pathname = model_dir + '40_1.6245147620307074_2.6875626488429742_checkpoint.tar'
+    model_dir = "checkpoints/4367_red_2_2__128_64_0.98_False_False_0.0005_1e-06___dev_eva_conv/"
+    checkpoint_pathname = model_dir + '2_12.097_8.040_checkpoint.tar'
     save_dir='checkpoints'
     print("save_dir", save_dir)
 
@@ -298,6 +298,10 @@ def main():
                 print("captions_gt", len(captions_gt))
                 print("captions_pred_every_five", len(captions_pred_every_five))
                 print("file ids every_five", len(all_ids_str_every_five))
+                print("captions_gt :", captions_gt)
+                print("captions_pred :", captions_pred)
+                print("captions_pred_every_five :", captions_pred_every_five)
+                print("captions_gt_indices", captions_gt_indices)
 
                 out_csv_fpath=model_dir + "/val_predicted_captions_greedy_NEW.csv"
                 write_csv_prediction_file(captions_pred_every_five, all_ids_str_every_five, out_csv_fpath)
