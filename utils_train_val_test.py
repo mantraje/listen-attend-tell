@@ -140,7 +140,7 @@ def greedy_captioning(probs_tensor, index2word):
     preds_word = []
 
     # print(index2word)
-
+    print("taille preds ",preds.shape[0],preds.shape[1])
     for i in range(preds.shape[0]):
         t = 0
         is_not_eos = True
@@ -151,8 +151,11 @@ def greedy_captioning(probs_tensor, index2word):
             pred_utt += c
             pred_utt += ' '
             is_not_eos = c != '<eos>'
+            if not(is_not_eos):
+                print("IL TROUVE LE TOKEN FIN")
             t += 1
         preds_word.append(pred_utt.replace('<sos> ', '').replace(' <eos> ', ''))
+        print(len(preds_word[0]))
     return preds_word
 
 
@@ -227,6 +230,7 @@ def decode_val(model, data_loader, criterion, index2word, word2index, decode_fir
 
                 # greedy search
                 preds_words = greedy_captioning(probs, index2word)
+                print("print predword[0] : ", preds_words[0])
                 all_preds_words.extend(preds_words)
 
                 torch.cuda.empty_cache()

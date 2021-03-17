@@ -2,7 +2,7 @@
 
 import torch
 
-from models import Seq2Seq, masked_ce_loss, masked_ce_loss_per_utt, count_parameters, BeamSeq2Seq
+from models import Seq2Seq, masked_ce_loss, masked_ce_loss_per_utt, count_parameters, BeamSeq2Seq, Seq2SeqGPT
 
 import numpy as np
 import random
@@ -66,14 +66,17 @@ def main():
     freeze_embeddings = False
 
     # Load pre-trained?
-    do_load_checkpoint = True
+    do_load_checkpoint = False
 
-    do_decode_val = True
+    do_gpt2_decode = True
+
+    do_decode_val = False
     do_decode_val_beamsearch = False
 
     do_plot_attention_masks_on_val = False
     decode_first_batch_only = False
 
+    do_decode_test_gpt = False
     do_decode_test = False
     do_decode_test_beamsearch = False
 
@@ -149,6 +152,19 @@ def main():
                         teacher_forcing_ratio=teacher_forcing_ratio,  # beam_size=beam_size, lm_weight=lm_weight,
                         word2index=word2index, return_attention_masks=False, device=DEVICE)
 
+    elif do_gpt2_decode:
+
+        model = Seq2SeqGPT(input_dim=input_dim, vocab_size=vocab_size, encoder_hidden_dim=encoder_hidden_dim,
+                        use_spec_augment=use_spec_augment,
+                        embedding_dim=embedding_dim,
+                        decoder_hidden_size_1=decoder_hidden_size_1,
+                        decoder_hidden_size_2=decoder_hidden_size_2, query_size=query_size,
+                        value_size=value_size, key_size=key_size, isAttended=True,
+                        pBLSTM_time_reductions=pBLSTM_time_reductions,
+                        emb_fpath=emb_fpath, freeze_embeddings=freeze_embeddings,
+                        teacher_forcing_ratio=teacher_forcing_ratio,  # beam_size=beam_size, lm_weight=lm_weight,
+                        word2index=word2index, return_attention_masks=False, device=DEVICE)
+
     elif do_decode_val_beamsearch or do_decode_test_beamsearch :
         print("Beam decoding w")
         if use_lm_bigram:
@@ -186,12 +202,12 @@ def main():
     model = model.to(DEVICE)
 
     criterion = masked_ce_loss
-    nepochs = start_train_epoch
+    nepochs = 0
 
     if do_decode_val_beamsearch or do_decode_test_beamsearch:
         val_batch_size = 1
     else:
-        val_batch_size = 100
+        val_batch_size = 2
 
     print("nepochs", nepochs)
     print("batch_size", val_batch_size)
@@ -223,7 +239,7 @@ def main():
     output_pad_at = 'end'
     num_workers = 0
 
-    if do_decode_val or do_decode_val_beamsearch:
+    if do_decode_val or do_decode_val_beamsearch or do_gpt2_decode:
         split = 'clotho_dataset_eva'
         if score_captions:
             has_gt_text = False
@@ -244,7 +260,7 @@ def main():
                                          num_workers=num_workers)
 
 
-    if do_decode_test or do_decode_test_beamsearch:
+    if do_decode_test or do_decode_test_beamsearch or do_decode_test_gpt:
         split = 'clotho_dataset_test'
         has_gt_text = False
 
@@ -264,7 +280,7 @@ def main():
                                          mapping_index_dict=mapping_index_dict,
                                          num_workers=num_workers)
 
-    if do_decode_val :
+    if do_decode_val or do_gpt2_decode :
         print("decoding val subset GREEEDY SEARCH...")
         result_fpath = 'results_decode_val_greedy.txt'
         result_fh = open(result_fpath, "at")
@@ -429,6 +445,7 @@ def main():
             out_csv_fpath = model_dir + "/test_predicted_captions_beamsearch_nolm_bs25_alpha12.csv"
 
         write_csv_prediction_file(captions_pred, all_ids_str, out_csv_fpath)
+
 
 
 if __name__ == '__main__':

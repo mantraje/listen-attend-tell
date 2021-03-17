@@ -3,6 +3,7 @@
 
 import torch
 import torch.nn as nn
+from transformers import GPT2LMHeadModel,GPT2Tokenizer
 import torch.nn.utils.rnn as rnn_utils
 import torch.nn.functional as F_torch
 import random
@@ -372,7 +373,7 @@ class Decoder(nn.Module):
                 char_embed = self.embedding(prediction.argmax(dim=-1))
 
             if self.isAttended:
-                inp = torch.cat([char_embed, context], dim=1)  # context is size B,h
+                inp = torch.cat([char_embed, context], dim=1)  # context is size B,h=128
             elif i < values.size(0):
                 inp = torch.cat([char_embed, values[i, :, :]], dim=1)
             else:
@@ -383,7 +384,7 @@ class Decoder(nn.Module):
             inp_2 = hidden_states[0][0]
             hidden_states[1] = self.lstm2(inp_2, hidden_states[1])
 
-            output = hidden_states[1][0]  # B, hidden//2, ex: B, 256
+            output = hidden_states[1][0]  # B, hidden//2, ex: B, 256 = prochain mot
 
             if self.isAttended:
                 ### Compute attention from the output of the second LSTM Cell ###
@@ -396,8 +397,11 @@ class Decoder(nn.Module):
 
                 if return_attention_masks:
                     att_masks.append(attention_mask.unsqueeze(1))
+                print("size cat ",(torch.cat([output, context],
+                                                           dim=1)).size())
                 prediction = self.character_prob(torch.cat([output, context],
                                                            dim=1))  # [B, hidden] concat with [B, key_hidden] ---> linear layer -->  B, Vocab
+                #prediction (nb fichier , vocabsize)
                 # print("prediction is on GPU?", prediction.device.index)
             else:
                 # if we don't use attention, use values at time step i instead of context
@@ -405,10 +409,158 @@ class Decoder(nn.Module):
                 prediction = self.character_prob(torch.cat([output, values[i, :, :]], dim=1))  # B, vocab
 
             predictions.append(prediction.unsqueeze(1))
+            print("size unsqueeze pred : ", (prediction.unsqueeze(1)).size())
         if return_attention_masks:
             return torch.cat(predictions, dim=1).to(self.DEVICE), torch.cat(att_masks, dim=1)
         else:
-            return torch.cat(predictions, dim=1).to(self.DEVICE)
+            print("size return : ",(torch.cat(predictions, dim=1).to(self.DEVICE)).size())
+            return torch.cat(predictions, dim=1).to(self.DEVICE) #batch_size, nb mot dans la phrase (max len), taille vocab
+
+class DecoderGPT(nn.Module):
+    """
+    Greedy decoder
+    """
+    def __init__(self, vocab_size, embedding_dim=128, decoder_hidden_size_1=128, decoder_hidden_size_2=128,
+                 query_size=128, value_size=128, key_size=128, emb_fpath=None, freeze_embeddings=False, isAttended=False,
+                 teacher_forcing_ratio=0.9, word2index=None, device='cpu'):
+        super(DecoderGPT, self).__init__()
+
+        if emb_fpath is None:
+            print(" using random learnable emb")
+            self.embedding = nn.Embedding(vocab_size, embedding_dim, padding_idx=word2index['<eos>'])
+        else:
+            if freeze_embeddings:
+                print(" using pretrained frozen emb from", emb_fpath)
+            else:
+                print(" using pretrained LEARNABLE emb from", emb_fpath)
+            pretrained_emb = torch.load(emb_fpath)
+            self.embedding = nn.Embedding.from_pretrained(pretrained_emb, freeze=freeze_embeddings)
+
+        self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
+        self.model = GPT2LMHeadModel.from_pretrained('gpt2-medium')
+        self.model = self.model.to(device)
+
+        self.DEVICE = device
+        self.vocab_size = vocab_size
+        self.isAttended = isAttended
+        self.word2index = word2index
+
+        if isAttended:
+            self.attention = Attention()
+
+
+    def forward(self, key, values, mask, text=None, isTrain=False, use_gumbel_noise=False,
+                return_attention_masks=False):
+        '''
+        :param key :(T, B, key_size) Output of the Encoder Key projection layer
+        :param values: (T, B, value_size) Output of the Encoder Value projection layer
+        :param mask: (B, 1, T) be careful, B the batch size is first dim! Useful for attention
+        :param text: (N, text_len) Batch input of text with text_length
+        :param isTrain: Train or eval mode
+        :return predictions: Returns the character prediction probability
+        '''
+
+        max_length = 30
+        eos_token_id = self.tokenizer.eos_token_id
+
+        batchsize = key.shape[1]
+        print("Forward batchsize ", batchsize)
+
+        # use 0 as padding id, shouldn't matter
+        start='<|endoftext|>'
+        context = torch.LongTensor([self.tokenizer.encode(start)] * batchsize)
+        print("context shape ", context.shape)
+        cur_len = 0
+
+        attn_mask = torch.zeros(context.shape).long()
+        for ix, tok_ids in enumerate(context):
+            attn_mask[ix][:len(tok_ids)] = 1
+
+        prob_pred = []
+
+        while cur_len < max_length:
+            outputs = self.model(context,past_key_values=key,attention_mask=attn_mask)
+            print("output ",outputs)
+            next_token_logits = outputs[0][:, -1, :]
+            print("next token ", next_token_logits)
+            past = outputs[1]
+            print("past? ", past)
+            next_token = torch.argmax(next_token_logits, dim=-1)
+
+            context = torch.cat([context, next_token.unsqueeze(-1)], dim=-1)
+
+            attn_mask = torch.cat([attn_mask, torch.ones((batchsize, 1)).long().cuda()], dim=1)
+
+            prob_pred.append(next_token_logits.unsqueeze(1))
+            cur_len += 1
+        print("res ", torch.cat(prob_pred, dim=1).to(self.DEVICE))
+
+        return torch.cat(prob_pred, dim=1).to(self.DEVICE) #batch_size, nb mot dans la phrase (max len), taille vocab
+
+
+class Seq2SeqGPT(nn.Module):
+    '''
+    wrapper "model" with Encoder-Decoder
+    '''
+
+    def __init__(self, input_dim, vocab_size, encoder_hidden_dim=128, use_spec_augment=True, embedding_dim=128, decoder_hidden_size_1=128,
+                 decoder_hidden_size_2=128,
+                 query_size=128, value_size=128, key_size=128, isAttended=True,
+                 pBLSTM_time_reductions=[2, 2, 2],
+                 emb_fpath=None, freeze_embeddings=False,
+                 teacher_forcing_ratio=0.9, word2index=None, return_attention_masks=False, device='cpu'):
+
+        super(Seq2SeqGPT, self).__init__()
+        self.encoder = Encoder(input_dim, encoder_hidden_dim, value_size, key_size, use_spec_augment=use_spec_augment,
+                               pBLSTM_time_reductions=pBLSTM_time_reductions)
+
+        self.decoder = DecoderGPT(vocab_size, embedding_dim=embedding_dim, decoder_hidden_size_1=decoder_hidden_size_1,
+                               decoder_hidden_size_2=decoder_hidden_size_2,
+                               query_size=query_size, value_size=value_size, key_size=key_size,
+                               emb_fpath=emb_fpath, freeze_embeddings=freeze_embeddings,
+                               isAttended=isAttended,
+                               teacher_forcing_ratio=teacher_forcing_ratio, word2index=word2index, device=device)
+
+        self.pBLSTM_time_reduction_factor = np.prod(pBLSTM_time_reductions)
+        self.return_attention_masks = return_attention_masks
+        self.DEVICE = device
+        self.vocab_size = vocab_size
+
+    def forward(self, audio_input, audio_len, text_input=None, isTrain=True, pretrain_decoder=False, use_gumbel_noise=False,
+                return_attention_masks=False):
+        """audio_input: a pad sequence sorted by decreasing length"""
+        # print("is the model on GPU?", next(self.parameters()).is_cuda)
+        # print("audio_input", type(audio_input), audio_input.device.index)
+
+        key, value, out_encoder_lengths = self.encoder(audio_input, audio_len)
+        T_after_pBLSTM_reduction, B, _ = key.size()
+
+        if pretrain_decoder:
+            # we replace the encoder outputs with random tensors
+            key = torch.zeros_like(key, device=self.DEVICE)
+            value = torch.zeros_like(value, device=self.DEVICE)
+            # key = torch.randn_like(key, device=self.DEVICE)
+            # value = torch.randn_like(value, device=self.DEVICE)
+
+        out_encoder_lengths = torch.tensor([l // self.pBLSTM_time_reduction_factor for l in audio_len]).to(self.DEVICE)
+        # out_encoder_lengths = torch.tensor([l // (4*self.pBLSTM_time_reduction_factor) for l in audio_len]).to(self.DEVICE)
+        out_encoder_lengths = out_encoder_lengths.unsqueeze(1)
+        out_encoder_T = audio_len[0] // self.pBLSTM_time_reduction_factor
+        # out_encoder_T = audio_len[0] // (4*self.pBLSTM_time_reduction_factor)
+        indices = torch.arange(0, out_encoder_T).unsqueeze(0).to(self.DEVICE)
+        mask_encoder_output = indices < out_encoder_lengths
+        mask_encoder_output = mask_encoder_output.unsqueeze(1).to(self.DEVICE)  # B, 1, T_after_pBLSTM_reduction
+
+        if return_attention_masks:
+            predictions, att_masks = self.decoder(key, value, mask_encoder_output, text=text_input, isTrain=isTrain,
+                                                  return_attention_masks=return_attention_masks,
+                                                  use_gumbel_noise=use_gumbel_noise)
+            return predictions, att_masks
+        else:
+            predictions = self.decoder(key, value, mask_encoder_output, text=text_input, isTrain=isTrain,
+                                       return_attention_masks=return_attention_masks, use_gumbel_noise=use_gumbel_noise)
+
+        return predictions  # size: B, T, Vocab
 
 
 class Seq2Seq(nn.Module):
@@ -448,7 +600,7 @@ class Seq2Seq(nn.Module):
         T_after_pBLSTM_reduction, B, _ = key.size()
 
         if pretrain_decoder:
-            # we replace the encoder outputs with random tensors
+            # we replace the encoder outputs with random tensors_
             key = torch.zeros_like(key, device=self.DEVICE)
             value = torch.zeros_like(value, device=self.DEVICE)
             # key = torch.randn_like(key, device=self.DEVICE)
@@ -462,6 +614,7 @@ class Seq2Seq(nn.Module):
         indices = torch.arange(0, out_encoder_T).unsqueeze(0).to(self.DEVICE)
         mask_encoder_output = indices < out_encoder_lengths
         mask_encoder_output = mask_encoder_output.unsqueeze(1).to(self.DEVICE)  # B, 1, T_after_pBLSTM_reduction
+        print(mask_encoder_output)
 
         if return_attention_masks:
             predictions, att_masks = self.decoder(key, value, mask_encoder_output, text=text_input, isTrain=isTrain,
@@ -772,7 +925,6 @@ class BeamSeq2Seq(nn.Module):
                                        return_attention_masks=return_attention_masks, use_gumbel_noise=use_gumbel_noise)
 
         return beam_predictions  # size: B, T, Vocab
-
 
 def masked_ce_loss(probs, targets, lengths, device='cpu'):
     """computes masked CE loss
