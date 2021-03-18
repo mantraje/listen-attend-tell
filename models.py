@@ -3,7 +3,7 @@
 
 import torch
 import torch.nn as nn
-from transformers import GPT2LMHeadModel,GPT2Tokenizer
+from transformers import GPT2LMHeadModel, GPT2Tokenizer, GPT2Config
 import torch.nn.utils.rnn as rnn_utils
 import torch.nn.functional as F_torch
 import random
@@ -416,6 +416,155 @@ class Decoder(nn.Module):
             print("size return : ",(torch.cat(predictions, dim=1).to(self.DEVICE)).size())
             return torch.cat(predictions, dim=1).to(self.DEVICE) #batch_size, nb mot dans la phrase (max len), taille vocab
 
+
+class EncoderGPT(nn.Module):
+    '''
+    Encoder takes the recordings as inputs and returns key and value.
+    Key and value are projections of the output from pBLSTM network.
+    '''
+
+    def __init__(self, input_dim, hidden_dim=1024, value_size=128, key_size=128, pBLSTM_time_reductions=[2], use_spec_augment=False, use_conv_blocks_in_encoder=False):
+        super(EncoderGPT, self).__init__()
+
+        self.use_dropout = True
+
+        self.use_spec_augment = use_spec_augment
+        print("Encoder, using spec augment:", use_spec_augment)
+
+        self.dropout_layer = nn.Dropout(p=0.1)
+        print("Encoder, using dropout:", self.use_dropout, str(0.1))
+
+        self.spec_augmenter = SpecAugmentation(time_drop_width=64, time_stripes_num=2,
+            freq_drop_width=4, freq_stripes_num=2)
+
+        self.use_conv_blocks_in_encoder = use_conv_blocks_in_encoder
+
+        if self.use_conv_blocks_in_encoder:
+
+            self.conv_block = nn.Sequential(
+                nn.Conv2d(1, 64, 3, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                nn.MaxPool2d(2, 2),
+                nn.Conv2d(64, 64, 3, padding=1),
+                nn.BatchNorm2d(64),
+                nn.ReLU(),
+                # nn.Conv2d(64, 1, 3, padding=1),
+                # nn.ReLU(),
+                nn.MaxPool2d(2, 2)
+            )
+
+        print("***********",hidden_dim)
+        self.lstm = nn.LSTM(input_size=input_dim, hidden_size=hidden_dim, num_layers=1, bidirectional=True)
+
+        nb_pBLSTM_layers = len(pBLSTM_time_reductions)
+        self.nb_pBLSTM_layers = nb_pBLSTM_layers
+
+        reduction_time_factor = pBLSTM_time_reductions[0]
+        self.pblstm1 = pBLSTM(input_dim=hidden_dim * 2 * reduction_time_factor, hidden_dim=hidden_dim,
+                              reduction_time_factor=reduction_time_factor)
+
+        if nb_pBLSTM_layers == 1:
+            print("Encoder has one pBLSTM layers")
+            print(" hidden_dim", hidden_dim)
+        if nb_pBLSTM_layers == 2:
+            print("Encoder has two pBLSTM layers")
+            print(" hidden_dim", hidden_dim)
+            reduction_time_factor = pBLSTM_time_reductions[1]
+            self.pblstm2 = pBLSTM(input_dim=hidden_dim * 2 * reduction_time_factor, hidden_dim=hidden_dim,
+                                  reduction_time_factor=reduction_time_factor)
+            print(" hidden_dim", hidden_dim)
+
+        elif nb_pBLSTM_layers == 3:
+            print("Encoder has three pBLSTM layers")
+            print(" hidden_dim", hidden_dim)
+            reduction_time_factor = pBLSTM_time_reductions[1]
+            self.pblstm2 = pBLSTM(input_dim=hidden_dim * 2 * reduction_time_factor, hidden_dim=hidden_dim,
+                                  reduction_time_factor=reduction_time_factor)
+            print(" hidden_dim", hidden_dim)
+
+            reduction_time_factor = pBLSTM_time_reductions[2]
+            self.pblstm3 = pBLSTM(input_dim=hidden_dim * 2 * reduction_time_factor, hidden_dim=hidden_dim,
+                                  reduction_time_factor=reduction_time_factor)
+
+        self.key_network = nn.Linear(hidden_dim * 2, value_size)
+        self.value_network = nn.Linear(hidden_dim * 2, key_size)
+
+    def forward(self, x, lens):
+        """x: padded tensor with sequences ordered by decreasing length, size: TxBxF
+          lens: list of the corresponding utterance lenghts in x
+        """
+        # T, B, F = x.size()
+        # T_init, B, F_init = x.size()
+        # print("Encoder x on GPU?:", x.device.index, "lens on GPU?", lens.device.index)
+
+        # careful: spec_augmenter modifies x in-place
+        if self.use_spec_augment:
+            print("USING SPEC AUG")
+            x = self.spec_augmenter(x.transpose(0,1).unsqueeze(1))
+            x = x.squeeze(1).transpose(0,1)
+
+        if self.use_dropout:
+            x = self.dropout_layer(x)
+
+
+        # if self.use_conv_blocks_in_encoder:
+        #     x = x.transpose(0, 1).contiguous()
+        #
+        #     x = torch.unsqueeze(x, dim=1)
+        #     # x = self.conv1(x)
+        #     # x = self.bn1(x)
+        #     # x = F_torch.relu(x)
+        #     # x = self.pool(x)
+        #     # x = self.conv2(x)
+        #     # x = self.bn2(x)
+        #     # x = F_torch.relu(x)
+        #     # x = self.pool(x)
+        #     x = self.conv_block(x)
+        #     B, C, T, F = x.size()
+        #     x = x.view(B, x.size(2), x.size(1) * x.size(3)).contiguous()
+        #
+        #     x1 = F_torch.adaptive_max_pool2d(x, (T, F_init // 2))
+        #     x2 = F_torch.adaptive_avg_pool2d(x, (T, F_init // 2))
+        #     x = torch.cat((x1, x2), dim=-1)
+        #     x = x.transpose(0, 1).contiguous()
+        #
+        #     lens //= 4
+
+        T, B, F = x.size()
+
+        rnn_inp = rnn_utils.pack_padded_sequence(x, lengths=lens, batch_first=False, enforce_sorted=True)
+        outputs, _ = self.lstm(rnn_inp)
+        # tmp, _ = rnn_utils.pad_packed_sequence(outputs)
+        # print("size after non-pyramidal blstm", tmp.size())
+
+        ### Use the outputs and pass it through the pBLSTM blocks! ###
+        outputs, new_lengths = self.pblstm1(outputs, self.use_dropout)
+        # print("outputs", outputs.size())
+
+        if self.nb_pBLSTM_layers > 1:
+            outputs, new_lengths = self.pblstm2(outputs, self.use_dropout)
+            # tmp, _ = rnn_utils.pad_packed_sequence(outputs)
+            # print("after pblstm2", tmp.size())
+
+        if self.nb_pBLSTM_layers > 2:
+            outputs, new_lengths = self.pblstm3(outputs, self.use_dropout)
+            # tmp, _ = rnn_utils.pad_packed_sequence(outputs)
+            # print("after pblstm3", tmp.size())
+
+        linear_input, _ = rnn_utils.pad_packed_sequence(outputs)
+        #linear_input = linear_input.contiguous()
+        #linear_input = linear_input.view(-1, linear_input.shape[2])
+        keys = self.key_network(linear_input)
+        values = self.value_network(linear_input)
+
+        # reshape to get 3-d tensors with T x B x h
+        keys = keys.view(-1, B, keys.size(1))
+        values = values.view(-1, B, values.size(1))
+        #linear_input=torch.transpose(torch.stack([linear_input[:, 0, :], linear_input[:, 1, :]], 0), 1, 2)
+        print(linear_input.shape)
+        return keys, values, new_lengths, linear_input
+
 class DecoderGPT(nn.Module):
     """
     Greedy decoder
@@ -436,10 +585,11 @@ class DecoderGPT(nn.Module):
             pretrained_emb = torch.load(emb_fpath)
             self.embedding = nn.Embedding.from_pretrained(pretrained_emb, freeze=freeze_embeddings)
 
+        confi = GPT2Config.from_pretrained('gpt2-medium')
+        confi.add_cross_attention = True
         self.tokenizer = GPT2Tokenizer.from_pretrained('gpt2')
-        self.model = GPT2LMHeadModel.from_pretrained('gpt2-medium')
+        self.model = GPT2LMHeadModel.from_pretrained('gpt2-medium',config=confi)
         self.model = self.model.to(device)
-
         self.DEVICE = device
         self.vocab_size = vocab_size
         self.isAttended = isAttended
@@ -449,7 +599,7 @@ class DecoderGPT(nn.Module):
             self.attention = Attention()
 
 
-    def forward(self, key, values, mask, text=None, isTrain=False, use_gumbel_noise=False,
+    def forward(self, key, values, mask, encoder_hid_states=None,text=None, isTrain=False, use_gumbel_noise=False,
                 return_attention_masks=False):
         '''
         :param key :(T, B, key_size) Output of the Encoder Key projection layer
@@ -479,7 +629,7 @@ class DecoderGPT(nn.Module):
         prob_pred = []
 
         while cur_len < max_length:
-            outputs = self.model(context,past_key_values=key,attention_mask=attn_mask)
+            outputs = self.model(context,attention_mask=attn_mask,encoder_hidden_states=encoder_hid_states)
             print("output ",outputs)
             next_token_logits = outputs[0][:, -1, :]
             print("next token ", next_token_logits)
@@ -503,7 +653,7 @@ class Seq2SeqGPT(nn.Module):
     wrapper "model" with Encoder-Decoder
     '''
 
-    def __init__(self, input_dim, vocab_size, encoder_hidden_dim=128, use_spec_augment=True, embedding_dim=128, decoder_hidden_size_1=128,
+    def __init__(self, input_dim, vocab_size, encoder_hidden_dim=1024, use_spec_augment=True, embedding_dim=128, decoder_hidden_size_1=128,
                  decoder_hidden_size_2=128,
                  query_size=128, value_size=128, key_size=128, isAttended=True,
                  pBLSTM_time_reductions=[2, 2, 2],
@@ -511,7 +661,7 @@ class Seq2SeqGPT(nn.Module):
                  teacher_forcing_ratio=0.9, word2index=None, return_attention_masks=False, device='cpu'):
 
         super(Seq2SeqGPT, self).__init__()
-        self.encoder = Encoder(input_dim, encoder_hidden_dim, value_size, key_size, use_spec_augment=use_spec_augment,
+        self.encoder = EncoderGPT(input_dim, encoder_hidden_dim, value_size, key_size, use_spec_augment=use_spec_augment,
                                pBLSTM_time_reductions=pBLSTM_time_reductions)
 
         self.decoder = DecoderGPT(vocab_size, embedding_dim=embedding_dim, decoder_hidden_size_1=decoder_hidden_size_1,
@@ -532,7 +682,7 @@ class Seq2SeqGPT(nn.Module):
         # print("is the model on GPU?", next(self.parameters()).is_cuda)
         # print("audio_input", type(audio_input), audio_input.device.index)
 
-        key, value, out_encoder_lengths = self.encoder(audio_input, audio_len)
+        key, value, out_encoder_lengths, outputEnc = self.encoder(audio_input, audio_len)
         T_after_pBLSTM_reduction, B, _ = key.size()
 
         if pretrain_decoder:
@@ -557,7 +707,7 @@ class Seq2SeqGPT(nn.Module):
                                                   use_gumbel_noise=use_gumbel_noise)
             return predictions, att_masks
         else:
-            predictions = self.decoder(key, value, mask_encoder_output, text=text_input, isTrain=isTrain,
+            predictions = self.decoder(key, value, mask_encoder_output,encoder_hid_states=outputEnc, text=text_input, isTrain=isTrain,
                                        return_attention_masks=return_attention_masks, use_gumbel_noise=use_gumbel_noise)
 
         return predictions  # size: B, T, Vocab

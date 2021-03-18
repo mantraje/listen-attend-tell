@@ -117,7 +117,7 @@ def main():
     use_spec_augment = False
     use_gumbel_noise = False
 
-    encoder_hidden_dim = 128
+    encoder_hidden_dim = 512
     embedding_dim = 128
     value_size, key_size, query_size = [64] * 3  # these could be different from embedding_dim
 
